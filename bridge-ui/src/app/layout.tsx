@@ -10,6 +10,8 @@ import atypTextFont from "@/assets/fonts/atypText";
 import "./globals.css";
 import "../scss/app.scss";
 import FirstVisitModal from "@/components/modal/first-time-visit";
+import { headers } from "next/headers";
+import { getNonce } from "@/scripts/getNonce";
 
 const metadata: Metadata = {
   title: "Linea Bridge",
@@ -21,10 +23,15 @@ const metadata: Metadata = {
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
+  // Get the nonce from the headers
+  const nonce = getNonce(headers());
+
   return (
     <html lang="en" data-theme="v2" className={clsx(atypFont.variable, atypTextFont.variable)}>
-      <title>{metadata.title?.toString()}</title>
-      <meta name="description" content={metadata.description?.toString()} key="desc" />
+      <head>
+        <title>{metadata.title?.toString()}</title>
+        <meta name="description" content={metadata.description?.toString()} key="desc" />
+      </head>
 
       <body>
         <noscript dangerouslySetInnerHTML={{ __html: gtmNoScript }} />
@@ -47,8 +54,13 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <FirstVisitModal />
       </body>
 
-      <Script id="usabilla" dangerouslySetInnerHTML={{ __html: usabillaBeScript }} strategy="lazyOnload" />
-      <Script id="gtm" dangerouslySetInnerHTML={{ __html: gtmScript }} strategy="lazyOnload" />
+      <Script
+        id="usabilla"
+        dangerouslySetInnerHTML={{ __html: usabillaBeScript }}
+        strategy="lazyOnload"
+        nonce={nonce}
+      />
+      <Script id="gtm" dangerouslySetInnerHTML={{ __html: gtmScript }} strategy="lazyOnload" nonce={nonce} />
     </html>
   );
 }
