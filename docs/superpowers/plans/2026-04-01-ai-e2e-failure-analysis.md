@@ -1,25 +1,27 @@
-name: slack-notify-failed-jobs
+# AI-Powered E2E Failure Analysis - Implementation Plan
 
-permissions:
-  contents: read
-  actions: read
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-on:
-  workflow_call:
-    inputs:
-      title:
-        description: "Notification title"
-        required: true
-        type: string
-      run_id:
-        description: "GitHub Actions Run ID"
-        required: true
-        type: string
-      extra_message:
-        description: "Optional extra context"
-        required: false
-        default: ""
-        type: string
+**Goal:** Add opt-in AI failure analysis to the Slack notification workflow, producing a Claude-generated root cause analysis artifact and enriching the Slack message with a summary.
+
+**Architecture:** Two-job design in `slack-notify-failed-jobs.yml` - an `ai-analysis` job (conditional, can fail) runs Claude analysis, then the `notify` job (always runs) sends the existing Slack notification enriched with AI results when available. `main.yml` passes new inputs to enable AI analysis.
+
+**Tech Stack:** GitHub Actions, `anthropics/claude-code-action@v1.0.71`, Slack Block Kit, `jq`, `gh` CLI
+
+**Spec:** `docs/superpowers/specs/2026-04-01-ai-e2e-failure-analysis-design.md`
+
+---
+
+### Task 1: Add new inputs and secrets to `slack-notify-failed-jobs.yml`
+
+**Files:**
+- Modify: `.github/workflows/slack-notify-failed-jobs.yml:7-29`
+
+- [ ] **Step 1: Add the three new inputs after `extra_message`**
+
+Insert after line 22 (after the `extra_message` input block):
+
+```yaml
       enable_ai_analysis:
         description: "Run AI-powered failure analysis using Claude"
         required: false
@@ -35,18 +37,44 @@ on:
         required: false
         type: string
         default: "end-2-end-debug-logs"
-    secrets:
-      channel_id:
-        description: "Slack channel ID (from secrets)"
-        required: true
-      slack_bot_token:
-        description: "Slack bot token for posting messages"
-        required: true
+```
+
+- [ ] **Step 2: Add the `anthropic_api_key` secret after `slack_bot_token`**
+
+Insert after line 29 (after the `slack_bot_token` secret):
+
+```yaml
       anthropic_api_key:
         description: "Anthropic API key for Claude analysis"
         required: false
+```
 
-jobs:
+- [ ] **Step 3: Validate YAML syntax**
+
+Run: `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/slack-notify-failed-jobs.yml'))"`
+Expected: No output (valid YAML)
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add .github/workflows/slack-notify-failed-jobs.yml
+git commit -m "feat: add AI analysis inputs to slack-notify-failed-jobs"
+```
+
+---
+
+### Task 2: Add the `ai-analysis` job to `slack-notify-failed-jobs.yml`
+
+**Files:**
+- Modify: `.github/workflows/slack-notify-failed-jobs.yml`
+
+The new job goes between the `jobs:` key and the existing `notify:` job.
+
+- [ ] **Step 1: Add the `ai-analysis` job definition**
+
+Insert after line 31 (`jobs:`), before the existing `notify:` job. The full job:
+
+```yaml
   ai-analysis:
     if: ${{ inputs.enable_ai_analysis }}
     runs-on: ubuntu-latest
@@ -212,172 +240,52 @@ jobs:
             echo 'summary=""' >> "$GITHUB_OUTPUT"
             echo "has_analysis=false" >> "$GITHUB_OUTPUT"
           fi
+```
 
+- [ ] **Step 2: Validate YAML syntax**
+
+Run: `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/slack-notify-failed-jobs.yml'))"`
+Expected: No output (valid YAML)
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add .github/workflows/slack-notify-failed-jobs.yml
+git commit -m "feat: add ai-analysis job to slack-notify-failed-jobs"
+```
+
+---
+
+### Task 3: Modify the `notify` job to consume AI analysis outputs
+
+**Files:**
+- Modify: `.github/workflows/slack-notify-failed-jobs.yml`
+
+The existing `notify` job needs: `needs`, `if: always()`, a new step to build the AI block, and the Slack payload updated to include it.
+
+- [ ] **Step 1: Add `needs` and `if` to the `notify` job**
+
+Change the `notify:` job definition from:
+
+```yaml
+  notify:
+    runs-on: gha-runner-scale-set-ubuntu-22.04-amd64-small
+```
+
+to:
+
+```yaml
   notify:
     needs: [ai-analysis]
     if: ${{ always() }}
     runs-on: gha-runner-scale-set-ubuntu-22.04-amd64-small
+```
 
-    steps:
-      - name: Compute context values
-        id: ctx
-        shell: bash
-        run: |
-          echo "repo=${{ github.repository }}" >> $GITHUB_OUTPUT
+- [ ] **Step 2: Add the "Build AI analysis block" step**
 
-          # PR number or empty
-          echo "pr_number=${{ github.event.pull_request.number || '' }}" >> $GITHUB_OUTPUT
+Insert after the "Build extra block" step (after the existing `extra_block` step), before "Send Slack Notification":
 
-          # PR URL or commit URL fallback
-          echo "pr_url=${{ github.event.pull_request.html_url || github.event.head_commit.url }}" >> $GITHUB_OUTPUT
-
-          # Commit SHA (PR head SHA or push SHA)
-          echo "commit_sha=${{ github.event.pull_request.head.sha || github.sha }}" >> $GITHUB_OUTPUT
-
-          # Commit URL
-          if [[ -n "${{ github.event.head_commit.url }}" ]]; then
-            echo "commit_url=${{ github.event.head_commit.url }}" >> $GITHUB_OUTPUT
-          elif [[ -n "${{ github.event.pull_request.head.sha }}" ]]; then
-            echo "commit_url=${{ github.server_url }}/${{ github.repository }}/commit/${{ github.event.pull_request.head.sha }}" >> $GITHUB_OUTPUT
-          else
-            echo "commit_url=${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}" >> $GITHUB_OUTPUT
-          fi
-
-          # Author (PR author or commit author or github.actor)
-          echo "author=${{ github.event.pull_request.user.login || github.event.head_commit.author.username || github.actor }}" >> $GITHUB_OUTPUT
-
-      - name: Fetch job list
-        id: jobs
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          curl -s \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            https://api.github.com/repos/${{ steps.ctx.outputs.repo }}/actions/runs/${{ inputs.run_id }}/jobs \
-            > jobs.json
-
-          echo "json<<EOF" >> $GITHUB_OUTPUT
-          cat jobs.json >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-      - name: Extract failed and cancelled jobs
-        id: extract_jobs
-        shell: bash
-        env:
-          JOBS_JSON: "${{ steps.jobs.outputs.json }}"
-        run: |
-          set -euo pipefail
-
-          extract_jobs() {
-            local conclusion="$1"
-            printf "%s" "$JOBS_JSON" | jq -c --arg c "$conclusion" '
-              [
-                .jobs[]
-                | select(.conclusion == $c)
-                | {
-                    type: "rich_text_section",
-                    elements: [
-                      { type: "text", text: (.name + ": ") },
-                      { type: "link", url: .html_url, text: .html_url }
-                    ]
-                  }
-              ]
-            '
-          }
-
-          failed=$(extract_jobs "failure")
-          cancelled=$(extract_jobs "cancelled")
-
-          set_output() {
-            local name="$1" value="$2"
-            if [[ "$value" == "[]" ]]; then
-              echo "${name}=" >> "$GITHUB_OUTPUT"
-            else
-              echo "${name}<<EOF" >> "$GITHUB_OUTPUT"
-              echo "$value" >> "$GITHUB_OUTPUT"
-              echo "EOF" >> "$GITHUB_OUTPUT"
-            fi
-          }
-
-          set_output "failed" "$failed"
-          set_output "cancelled" "$cancelled"
-
-          if [[ "$failed" == "[]" && "$cancelled" == "[]" ]]; then
-            echo "has_results=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_results=true" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Build job sections
-        id: job_sections
-        if: ${{ steps.extract_jobs.outputs.has_results == 'true' }}
-        shell: bash
-        env:
-          FAILED: "${{ steps.extract_jobs.outputs.failed }}"
-          CANCELLED: "${{ steps.extract_jobs.outputs.cancelled }}"
-        run: |
-          set -euo pipefail
-
-          build_section() {
-            local label="$1" items="$2"
-            jq -n -c --arg label "$label" --argjson items "$items" '{
-              type: "rich_text",
-              elements: [
-                {
-                  type: "rich_text_section",
-                  elements: [
-                    { type: "text", text: $label, style: { bold: true } }
-                  ]
-                },
-                {
-                  type: "rich_text_list",
-                  style: "bullet",
-                  elements: $items
-                }
-              ]
-            }'
-          }
-
-          if [[ -n "$FAILED" ]]; then
-            block=$(build_section "Failed Jobs:" "$FAILED")
-            echo "failed_section=- ${block}" >> "$GITHUB_OUTPUT"
-          else
-            echo "failed_section=" >> "$GITHUB_OUTPUT"
-          fi
-
-          if [[ -n "$CANCELLED" ]]; then
-            block=$(build_section "Cancelled Jobs:" "$CANCELLED")
-            echo "cancelled_section=- ${block}" >> "$GITHUB_OUTPUT"
-          else
-            echo "cancelled_section=" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Build extra block
-        id: extra_block
-        if: ${{ steps.extract_jobs.outputs.has_results == 'true' }}
-        shell: bash
-        env:
-          EXTRA_MESSAGE: "${{ inputs.extra_message }}"
-        run: |
-          if [[ -n "${EXTRA_MESSAGE}" ]]; then
-            block=$(jq -n -c --arg msg "$EXTRA_MESSAGE" '{
-              type: "rich_text",
-              elements: [{
-                type: "rich_text_section",
-                elements: [
-                  { type: "text", text: "Message: ", style: { bold: true } },
-                  { type: "text", text: $msg }
-                ]
-              }]
-            }')
-            echo "block<<EOF" >> "$GITHUB_OUTPUT"
-            echo "- $block" >> "$GITHUB_OUTPUT"
-            echo "EOF" >> "$GITHUB_OUTPUT"
-          else
-            echo "block=" >> "$GITHUB_OUTPUT"
-          fi
-
+```yaml
       - name: Build AI analysis block
         id: ai_block
         if: ${{ steps.extract_jobs.outputs.has_results == 'true' && needs.ai-analysis.outputs.has_analysis == 'true' }}
@@ -415,60 +323,168 @@ jobs:
           echo "divider_block=- ${divider}" >> "$GITHUB_OUTPUT"
           echo "analysis_block=- ${analysis_block}" >> "$GITHUB_OUTPUT"
           echo "link_block=- ${link_block}" >> "$GITHUB_OUTPUT"
+```
 
-      - name: Send Slack Notification
-        if: ${{ steps.extract_jobs.outputs.has_results == 'true' }}
-        uses: slackapi/slack-github-action@91efab103c0de0a537f72a35f6b8cda0ee76bf0a #v2.1.1
-        with:
-          method: chat.postMessage
-          token: ${{ secrets.slack_bot_token }}
-          payload: |
-            channel: ${{ secrets.channel_id }}
-            text: ":x: GitHub CI for *${{ steps.ctx.outputs.repo }}* — *${{ inputs.title }}*"
-            blocks:
-              - type: header
-                text:
-                  type: plain_text
-                  text: ":x: ${{ inputs.title }}"
-                  emoji: true
-              
-              - type: rich_text
-                elements:
-                  - type: rich_text_section
-                    elements:
-                      - type: text
-                        text: "Repository: "
-                        style:
-                          bold: true
-                      - type: text
-                        text: "${{ steps.ctx.outputs.repo }}"
-              
-              - type: rich_text
-                elements:
-                  - type: rich_text_section
-                    elements:
-                      - type: text
-                        text: "Author: "
-                        style:
-                          bold: true
-                      - type: text
-                        text: "${{ steps.ctx.outputs.author }}"
+Each output is a single-line value, matching the existing `extra_block` and `failed_section` patterns. This avoids the multiline heredoc indentation issue where GitHub Actions only indents the first line of a multiline substitution - which would break the Slack payload YAML parsing.
 
-              - type: rich_text
-                elements:
-                  - type: rich_text_section
-                    elements:
-                      - type: text
-                        text: "Commit: "
-                        style:
-                          bold: true
-                      - type: link
-                        url: "${{ steps.ctx.outputs.commit_url }}"
-                        text: "${{ steps.ctx.outputs.commit_sha }}"
+- [ ] **Step 3: Add the AI block outputs to the Slack payload**
 
+In the "Send Slack Notification" step, append the three AI block outputs after the last existing block interpolation. Change the end of the payload from:
+
+```yaml
+              ${{ steps.job_sections.outputs.failed_section }}
+              ${{ steps.job_sections.outputs.cancelled_section }}
+              ${{ steps.extra_block.outputs.block }}
+```
+
+to:
+
+```yaml
               ${{ steps.job_sections.outputs.failed_section }}
               ${{ steps.job_sections.outputs.cancelled_section }}
               ${{ steps.extra_block.outputs.block }}
               ${{ steps.ai_block.outputs.divider_block }}
               ${{ steps.ai_block.outputs.analysis_block }}
               ${{ steps.ai_block.outputs.link_block }}
+```
+
+- [ ] **Step 4: Validate YAML syntax**
+
+Run: `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/slack-notify-failed-jobs.yml'))"`
+Expected: No output (valid YAML)
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add .github/workflows/slack-notify-failed-jobs.yml
+git commit -m "feat: enrich Slack notification with AI analysis summary"
+```
+
+---
+
+### Task 4: Update `main.yml` to enable AI analysis
+
+**Files:**
+- Modify: `.github/workflows/main.yml:9-13` (permissions)
+- Modify: `.github/workflows/main.yml:310-331` (notify job)
+
+- [ ] **Step 1: Add AI analysis inputs, secret, and job-level permissions to notify job**
+
+Change the notify job call from:
+
+```yaml
+    uses: ./.github/workflows/slack-notify-failed-jobs.yml
+    with:
+      title: "Main workflow Failed"
+      run_id: ${{ github.run_id }}
+    secrets:
+      channel_id: ${{ secrets.SLACK_ENGINEERING_ALERTS_CHANNEL_ID }}
+      slack_bot_token: ${{ secrets.SLACK_GITHUB_ACTIONS_ALERTS_BOT_TOKEN }}
+```
+
+to:
+
+```yaml
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    uses: ./.github/workflows/slack-notify-failed-jobs.yml
+    with:
+      title: "Main workflow Failed"
+      run_id: ${{ github.run_id }}
+      enable_ai_analysis: true
+      ai_analysis_model: "claude-sonnet-4-20250514"
+    secrets:
+      channel_id: ${{ secrets.SLACK_ENGINEERING_ALERTS_CHANNEL_ID }}
+      slack_bot_token: ${{ secrets.SLACK_GITHUB_ACTIONS_ALERTS_BOT_TOKEN }}
+      anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+```
+
+- [ ] **Step 2: Validate YAML syntax**
+
+Run: `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/main.yml'))"`
+Expected: No output (valid YAML)
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add .github/workflows/main.yml
+git commit -m "feat: enable AI failure analysis in main workflow notify"
+```
+
+---
+
+### Task 5: Final validation and review
+
+**Files:**
+- Review: `.github/workflows/slack-notify-failed-jobs.yml` (full file)
+- Review: `.github/workflows/main.yml` (permissions + notify job)
+
+- [ ] **Step 1: Validate both workflow files parse as valid YAML**
+
+```bash
+python3 -c "
+import yaml
+for f in ['.github/workflows/slack-notify-failed-jobs.yml', '.github/workflows/main.yml']:
+    yaml.safe_load(open(f))
+    print(f'{f}: OK')
+"
+```
+
+Expected:
+```
+.github/workflows/slack-notify-failed-jobs.yml: OK
+.github/workflows/main.yml: OK
+```
+
+- [ ] **Step 2: Verify `ai-analysis` job structure**
+
+Check that the `ai-analysis` job has:
+- `if: ${{ inputs.enable_ai_analysis }}` (job-level conditional)
+- `timeout-minutes: 10`
+- `permissions` with `id-token: write` at job level
+- `outputs` declaring `summary` and `has_analysis`
+- 6 steps: Checkout, Fetch logs, Download artifact, Claude analysis, Upload artifact, Extract summary
+
+Run: `grep -c 'ai-analysis\|enable_ai_analysis\|claude-code-action\|ai-failure-analysis\|extract_summary' .github/workflows/slack-notify-failed-jobs.yml`
+Expected: 7+ matches
+
+- [ ] **Step 3: Verify `notify` job changes**
+
+Check that the `notify` job has:
+- `needs: [ai-analysis]`
+- `if: ${{ always() }}`
+- "Build AI analysis block" step referencing `needs.ai-analysis.outputs`
+- Slack payload including `${{ steps.ai_block.outputs.divider_block }}`, `${{ steps.ai_block.outputs.analysis_block }}`, `${{ steps.ai_block.outputs.link_block }}`
+
+- [ ] **Step 4: Verify `main.yml` changes**
+
+Check that `main.yml` has:
+- `id-token: write` in permissions
+- `enable_ai_analysis: true` in notify inputs
+- `anthropic_api_key` in notify secrets
+
+- [ ] **Step 5: Verify no changes to other callers**
+
+Confirm no other workflow files were modified:
+
+```bash
+git diff --name-only HEAD~4
+```
+
+Expected: Only these two files:
+```
+.github/workflows/slack-notify-failed-jobs.yml
+.github/workflows/main.yml
+```
+
+- [ ] **Step 6: Review complete workflow file**
+
+Read the full `slack-notify-failed-jobs.yml` end-to-end. Verify:
+- Inputs section has 6 inputs (3 existing + 3 new)
+- Secrets section has 3 secrets (2 existing + 1 new)
+- Two jobs: `ai-analysis` then `notify`
+- `ai-analysis` has correct permissions, conditional, timeout
+- `notify` uses `needs: [ai-analysis]` and `if: always()`
+- Slack payload includes AI block at the end
